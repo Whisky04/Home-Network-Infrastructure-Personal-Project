@@ -1,0 +1,361 @@
+Specs:
+	Model: Belkin RT3200/Linksys E8450
+	OpenWRT version: OpenWrt 24.10.0 r28427-6df0e3d02a / LuCI openwrt-24.10 branch 25.014.55016~7046a1c
+	Kernel version: 6.6.73
+	MAC address: Spoofed on WAN port
+	DUID: Spoofed
+
+General:
+	Common:
+	opkg update # updating
+	ip link show # show WAN interface names
+		
+	Installing packages:
+	opkg install nano
+	opkg install ebtables
+	opkg install install https-dns-proxy 
+
+
+Set default Editor to be nano
+```
+# Open profile
+nano /etc/profile
+
+# Add the following line to the end and save
+export EDITOR=nano
+
+# Reload to a new profile
+source /etc/profile
+```
+
+
+Blocking LLDP packets
+```
+# Block incoming LLDP on WAN
+ebtables -A INPUT -i wan -d 01:80:c2:00:00:0e -j DROP
+
+# Block outgoing LLDP on WAN  
+ebtables -A OUTPUT -o wan -d 01:80:c2:00:00:0e -j DROP
+
+# Block forwarding LLDP through WAN
+ebtables -A FORWARD -i wan -d 01:80:c2:00:00:0e -j DROP
+ebtables -A FORWARD -o wan -d 01:80:c2:00:00:0e -j DROP
+	
+# Make it persistent
+nano /etc/rc.local
+	
+# Write before 'exit 0'
+ebtables -A INPUT -i wan -d 01:80:c2:00:00:0e -j DROP
+ebtables -A OUTPUT -o wan -d 01:80:c2:00:00:0e -j DROP
+ebtables -A FORWARD -i wan -d 01:80:c2:00:00:0e -j DROP
+ebtables -A FORWARD -o wan -d 01:80:c2:00:00:0e -j DROP
+
+# Verify
+ebtables -L
+
+# ADDITIONAL KNOWLEDGE:
+ebtables -F # to clear all current rules in ebtables
+```
+
+
+Set TTL and HL to 128 (standard to Windows)
+```
+# Open firewall config file
+nano /etc/config/firewall
+
+# Add new block BEFORE first "rule" block
+config include
+    option path '/etc/firewall.user'
+    option fw4_compatible '1'
+
+# Open firewall.user file
+nano /etc/firewall.user
+
+# Write out rules for IPv4 and for IPv6 accordingly
+nft add rule inet fw4 mangle_postrouting oifname wan ip ttl set 128
+nft add rule inet fw4 mangle_postrouting oifname wan ip6 hoplimit set 128
+
+# Restart the firewall service
+/etc/init.d/firewall restart
+
+# Verify (should be seen 
+# chain mangle_postrouting {
+#    ...
+#    oifname "wan" ip ttl set 128 comment "!fw4"
+#    oifname "wan" ip6 hoplimit set 128 comment "!fw4"
+# }
+# )
+nft list ruleset
+```
+
+
+Rewrite system config
+```
+# Open system config file
+nano /etc/config/system
+
+# Change the following lines
+config system
+        option hostname 'OpenWrt' # Changed to custom hostname
+        option timezone 'UTC' # Changed to 'EET-2EEST,M3.5.0/3,M10.5.0/4' (Vilnius time)
+        option ttylogin '0'
+        option log_size '128'
+        option urandom_seed '0'
+        option compat_version '2.0'
+
+config timeserver 'ntp'
+        option enabled '1'
+        option enable_server '0'
+        list server '0.openwrt.pool.ntp.org' # Follow down \/
+	list server '1.openwrt.pool.ntp.org' # Follow down \/
+	list server '2.openwrt.pool.ntp.org' # Changed to 'time.windows.com'
+
+config led 'led_wan'
+        option name 'WAN'
+        option sysfs 'inet:blue'
+        option trigger 'netdev'
+        option dev 'wan'
+        list mode 'link'
+        list mode 'tx'
+        list mode 'rx'
+```
+
+
+Change the TCP window size (performance)
+```
+# 
+nano /etc/sysctl.conf
+
+# Insert the following lines
+net.core.rmem_max = 4194304
+net.core.wmem_max = 4194304
+net.ipv4.tcp_rmem = 4096 262144 4194304
+net.ipv4.tcp_wmem = 4096 262144 4194304
+
+# Save changes and verify
+sysctl -p /etc/sysctl.conf
+```
+
+
+Block 'connectivity-check.ubuntu.com' (Basically make it NOT go from the router)
+```
+# Embed a new line to dnsmasq config file. 127.0.0.1 => the packet will never ever go out of the router
+echo "address=/connectivity-check.ubuntu.com/127.0.0.1" >> /etc/dnsmasq.conf
+
+# Restart the dnsmasq service
+/etc/init.d/dnsmasq restart
+
+# Verify service
+/etc/init.d/dnsmasq status
+```
+
+Apply spoofed CID/DUID-LLT Type 1, MSFT 5.0 and disable DHCPv6 (as Windows uses)
+```
+# Open network config file
+nano /etc/config/network
+
+# Add new line and save
+config interface 'wan'
+	option device 'wan'
+	option proto 'dhcp'
+	option vendorid 'MSFT 5.0' # to be as Windows
+	option hostname '...' # set custom hostname (not provided in the document)
+	option ip6assign '0' # new line
+	option ip6class 'wan' # new line
+	option delegate '0' # new line
+	option dhcpv6 'disabled' # new line
+
+
+config interface 'wan6'
+	option device 'wan'
+	option proto 'static' # change to 'static'
+	option clientid '...' # spoofed DUID here (not provided in the document)
+	option reqprefix '0' # new line
+	option reqaddress 'none' # new line
+	option ip6assign '0' # new line
+	option ip6class 'wan' # new line
+	option delegate '0' # new line
+
+# Restart network service
+/etc/init.d/network restart
+```
+
+
+Adding job to send NTP packet to windows server once an hour
+```
+# Disable NTP service
+/etc/init.d/sysntpd stop
+/etc/init.d/sysntpd disable
+
+# Create a job
+crontab -e
+
+# Write out the line (+ singes the correct server)
+0 * * * * /usr/sbin/ntpd -q -p time.windows.com
+
+# Restart NTP service
+/etc/init.d/sysntpd restart
+
+# Verify service
+/etc/init.d/sysntpd status
+```
+
+
+
+Applying proxy to DNS over HTTPS (DoH) using Cloudflare
+```
+# Set the bootstrap DNS servers for the first https-dns-proxy instance to Cloudflare’s DNS (1.1.1.1 and 1.0.0.1)
+uci set https-dns-proxy.@https-dns-proxy[0].bootstrap_dns='1.1.1.1,1.0.0.1'
+
+# Sets the DoH endpoint URL that the proxy will use to actually perform DoH lookups
+uci set https-dns-proxy.@https-dns-proxy[0].resolver_url='https://cloudflare-dns.com/dns-query'
+
+# Save the changes
+uci commit https-dns-proxy
+
+# Enables the new service to start automatically on boot
+/etc/init.d/https-dns-proxy enable
+
+# (Optional) Start it right away
+/etc/init.d/https-dns-proxy start
+
+# Verify
+/etc/init.d/https-dns-proxy status
+```
+
+
+Enable packet steering (Enables dual-core for processing packets)
+```
+# Edit network config
+uci set network.globals.packet_steering='1'
+
+# Save the changes
+uci commit network
+
+# Restart service
+/etc/init.d/network restart
+```
+
+Optimize software flow offloading (routes connections through linux-kernel nftables flowtable)
+```
+# Enable the offloading
+uci set firewall.@defaults[0].flow_offloading='1'
+
+# Disable hardware offloading
+uci set firewall.@defaults[0].flow_offloading_hw='0'
+
+# Save the changes
+uci commit firewall
+
+# Restart the firewall service
+/etc/init.d/firewall restart
+```
+
+Optimize the 5GHz settings
+```
+# Open wireless config file
+nano /etc/config/wireless
+
+# Add new lines under...
+config wifi-device 'radio1'
+	...
+	option channel '149' # use less polluted DFS
+	option htmode 'HE80' # channel width for WiFi6 compatability
+	option legacy_rates '0' # disable 802.11b rates
+	option mu_beamformer '1' # enables multi-user beamforming
+	...
+
+config wifi-iface 'default_radio1'
+	...
+	option ieee80211w '1'  # enable management frame protection
+	...
+
+# Restart the service
+wifi reload
+```
+
+Additional settings for system control
+```
+# Open the sysctl
+nano /etc/sysctl.conf
+
+# Add new lines
+...
+net.netfilter.nf_conntrack_max = 32768 # set maximum tracked connections for preventing table overflow with many devices
+net.ipv4.tcp_fastopen = 3 # enables TCP Fast Open (client + server)
+net.ipv4.tcp_mtu_probing = 1 # detects broken MTU paths
+...
+
+# Apply changes
+sysctl -p /etc/sysctl.conf
+```
+
+Add port forwarding for the game servers
+```
+# Navigate to firewall setup
+nano /etc/config/firewall
+
+# Add the new port forward for the games
+config redirect
+        option dest 'lan'
+        option target 'DNAT'
+        option name 'Mindustry-6567'
+        option src 'wan'
+        option src_dport '6567'
+        option dest_ip '...' # Server LAN IP here (not provided in the document)
+        option dest_port '6567'
+        option enabled '0'
+
+config redirect
+        option dest 'lan'
+        option target 'DNAT'
+        option name 'Factorio-34197'
+        option src 'wan'
+        option src_dport '34197'
+        option dest_ip '...' # Server LAN IP here (not provided in the document)
+        option dest_port '34197'
+        option enabled '0'
+
+config redirect
+        option dest 'lan'
+        option target 'DNAT'
+        option name 'Minecraft-25565'
+        option src 'wan'
+        option src_dport '25565'
+        option dest_ip '...' # Server LAN IP here (not provided in the document)
+        option dest_port '25565'
+        option enabled '0'
+
+config redirect
+        option dest 'lan'
+        option target 'DNAT'
+        option name 'Barotrauma-27015'
+        option src 'wan'
+        option src_dport '27015'
+        option dest_ip '...' # Server LAN IP here (not provided in the document)
+        option dest_port '27015'
+        option enabled '0'
+
+config redirect
+        option dest 'lan'
+        option target 'DNAT'
+        option name 'Zomboid-16261'
+        option src 'wan'
+        option src_dport '16261'
+        option dest_ip '...' # Server LAN IP here (not provided in the document)
+        option dest_port '16261'
+        list proto 'udp' # The game server relies on UDP, so only UDP packets are forwarded
+
+config redirect
+        option dest 'lan'
+        option target 'DNAT'
+        option name 'Zomboid-16262'
+        option src 'wan'
+        option src_dport '16262'
+        option dest_ip '...' # Server LAN IP here (not provided in the document)
+        option dest_port '16262'
+        list proto 'udp' # The game server relies on UDP, so only UDP packets are forwarded
+```
+
+# Restart the firewall service
+/etc/init.d/firewall restart
